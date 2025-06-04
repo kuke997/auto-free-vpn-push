@@ -10,8 +10,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 BASE_URL = "https://nodefree.net"
-# Discourse API 获取最新话题的接口
-TOPICS_API_URL = f"{BASE_URL}/latest.json"
+FIRST_PAGE_API = f"{BASE_URL}/latest.json"
 
 HEADERS = {
     "User-Agent": (
@@ -20,34 +19,49 @@ HEADERS = {
     )
 }
 
-def get_threads_from_api(api_url, pages=3):
-    """通过 Discourse API 获取最新主题，每页30个主题"""
+def get_threads_with_pagination():
+    """
+    通过 Discourse API 递归获取所有主题，直到没有下一页
+    """
     threads = []
-    for page in range(pages):
-        params = {"page": page}
+    next_url = FIRST_PAGE_API
+
+    while next_url:
+        print(f"➡️ 抓取 API 页面: {next_url}")
         try:
-            resp = requests.get(api_url, params=params, headers=HEADERS, timeout=15)
+            resp = requests.get(next_url, headers=HEADERS, timeout=15)
             resp.raise_for_status()
             data = resp.json()
+
             topics = data.get("topic_list", {}).get("topics", [])
-            print(f"✅ 第{page+1}页抓取到 {len(topics)} 个主题")
+            print(f"  抓取到 {len(topics)} 个主题")
             for topic in topics:
                 topic_id = topic.get("id")
                 slug = topic.get("slug")
                 if topic_id and slug:
                     url = f"{BASE_URL}/t/{slug}/{topic_id}"
                     threads.append(url)
+
+            # 获取下一页链接
+            more_topics_url = data.get("topic_list", {}).get("more_topics_url")
+            if more_topics_url:
+                # more_topics_url 格式: "/latest.json?no_definitions=true&ascending=false&since=xxx"
+                # 需要拼接 BASE_URL
+                next_url = BASE_URL + more_topics_url
+            else:
+                next_url = None
+
         except Exception as e:
-            print(f"⚠️ 抓取第{page+1}页失败: {e}")
+            print(f"⚠️ 抓取API失败: {e}")
+            break
+
     return threads
 
 def extract_yaml_links_from_thread(url):
-    """获取帖子页面源码，找出所有yaml链接"""
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.raise_for_status()
         text = resp.text
-        # 使用正则简单匹配所有链接，筛选yaml
         urls = re.findall(r'href="([^"]+\.ya?ml)"', text, re.I)
         links = set()
         for href in urls:
@@ -105,13 +119,12 @@ async def main():
     if not BOT_TOKEN or not CHANNEL_ID:
         print("⚠️ 未设置 BOT_TOKEN 或 CHANNEL_ID，将跳过 Telegram 推送")
 
-    print("🌐 开始通过 Discourse API 爬取 nodefree.net 最新文章列表...")
+    print("🌐 开始通过 Discourse API 爬取 nodefree.net 主题列表...")
 
-    threads = get_threads_from_api(TOPICS_API_URL, pages=3)
+    threads = get_threads_with_pagination()
     print(f"\n总共抓取到 {len(threads)} 篇主题")
 
     all_yaml_links = set()
-
     for thread_url in threads:
         yaml_links = extract_yaml_links_from_thread(thread_url)
         all_yaml_links.update(yaml_links)
