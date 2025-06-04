@@ -2,7 +2,6 @@ import os
 import re
 import asyncio
 import requests
-from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.constants import ParseMode
 import urllib.parse
@@ -11,6 +10,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 BASE_URL = "https://nodefree.net"
+# Discourse API 获取最新话题的接口
+TOPICS_API_URL = f"{BASE_URL}/latest.json"
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -18,52 +20,60 @@ HEADERS = {
     )
 }
 
-def get_threads_on_page(url):
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        threads = set()
-        # 文章链接符合 /t/xxx 或 /t/xxx/数字 格式
-        for a in soup.select("a[href^='/t/']"):
-            href = a.get("href")
-            if href and re.match(r"^/t/[^/]+(/[\d]+)?$", href):
-                full_url = BASE_URL + href
-                threads.add(full_url)
-        return list(threads)
-    except Exception as e:
-        print(f"⚠️ 获取列表页文章失败：{url}，错误：{e}")
-        return []
+def get_threads_from_api(api_url, pages=3):
+    """通过 Discourse API 获取最新主题，每页30个主题"""
+    threads = []
+    for page in range(pages):
+        params = {"page": page}
+        try:
+            resp = requests.get(api_url, params=params, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            topics = data.get("topic_list", {}).get("topics", [])
+            print(f"✅ 第{page+1}页抓取到 {len(topics)} 个主题")
+            for topic in topics:
+                topic_id = topic.get("id")
+                slug = topic.get("slug")
+                if topic_id and slug:
+                    url = f"{BASE_URL}/t/{slug}/{topic_id}"
+                    threads.append(url)
+        except Exception as e:
+            print(f"⚠️ 抓取第{page+1}页失败: {e}")
+    return threads
 
 def extract_yaml_links_from_thread(url):
+    """获取帖子页面源码，找出所有yaml链接"""
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+        text = resp.text
+        # 使用正则简单匹配所有链接，筛选yaml
+        urls = re.findall(r'href="([^"]+\.ya?ml)"', text, re.I)
         links = set()
-        for a in soup.find_all("a", href=True):
-            href = a["href"].strip()
-            if re.search(r"\.ya?ml$", href, re.I):
-                if href.startswith("//"):
-                    href = "https:" + href
-                elif href.startswith("/"):
-                    href = BASE_URL + href
-                links.add(href)
+        for href in urls:
+            if href.startswith("//"):
+                href = "https:" + href
+            elif href.startswith("/"):
+                href = BASE_URL + href
+            links.add(href)
+        print(f"   📝 {url} 找到 YAML 链接数量: {len(links)}")
         return list(links)
     except Exception as e:
-        print(f"⚠️ 解析文章页面失败：{url}，错误：{e}")
+        print(f"⚠️ 解析帖子页面失败：{url}，错误：{e}")
         return []
 
 def validate_subscription(url):
     try:
         res = requests.get(url, timeout=10)
         if res.status_code != 200:
+            print(f"    ❌ 验证失败（HTTP {res.status_code}）: {url}")
             return False
         text = res.text.lower()
-        if any(k in text for k in ("proxies", "vmess://", "ss://", "clash")):
-            return True
-        return False
-    except Exception:
+        valid = any(k in text for k in ("proxies", "vmess://", "ss://", "clash"))
+        print(f"    {'✔️ 有效' if valid else '❌ 无效'} 订阅链接: {url}")
+        return valid
+    except Exception as e:
+        print(f"    ❌ 验证异常: {url}，错误: {e}")
         return False
 
 async def send_to_telegram(bot_token, channel_id, urls):
@@ -87,44 +97,39 @@ async def send_to_telegram(bot_token, channel_id, urls):
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
-        print("✅ 推送成功")
+        print("✅ Telegram 推送成功")
     except Exception as e:
-        print("❌ 推送失败:", e)
+        print("❌ Telegram 推送失败:", e)
 
 async def main():
     if not BOT_TOKEN or not CHANNEL_ID:
-        print("❌ 未设置 BOT_TOKEN 或 CHANNEL_ID")
-        return
+        print("⚠️ 未设置 BOT_TOKEN 或 CHANNEL_ID，将跳过 Telegram 推送")
 
-    print("🌐 开始爬取 nodefree.net 最新文章列表...")
+    print("🌐 开始通过 Discourse API 爬取 nodefree.net 最新文章列表...")
+
+    threads = get_threads_from_api(TOPICS_API_URL, pages=3)
+    print(f"\n总共抓取到 {len(threads)} 篇主题")
+
     all_yaml_links = set()
 
-    # 抓取首页和前两页分页
-    for page_num in range(1, 4):
-        if page_num == 1:
-            url = f"{BASE_URL}/"
-        else:
-            url = f"{BASE_URL}/page/{page_num}"
-        print(f"➡️ 抓取列表页: {url}")
-        threads = get_threads_on_page(url)
-        print(f" 发现 {len(threads)} 篇文章")
+    for thread_url in threads:
+        yaml_links = extract_yaml_links_from_thread(thread_url)
+        all_yaml_links.update(yaml_links)
 
-        for thread_url in threads:
-            print(f"   ↪️ 解析文章: {thread_url}")
-            yaml_links = extract_yaml_links_from_thread(thread_url)
-            print(f"      找到 {len(yaml_links)} 个 YAML 链接")
-            all_yaml_links.update(yaml_links)
+    print(f"\n🔍 验证订阅链接有效性，共 {len(all_yaml_links)} 个链接")
+    valid_links = []
+    for link in all_yaml_links:
+        if validate_subscription(link):
+            valid_links.append(link)
 
-    print(f"🔍 验证订阅链接有效性，共 {len(all_yaml_links)} 个")
-    valid_links = [url for url in all_yaml_links if validate_subscription(url)]
-    print(f"✔️ 有效订阅链接数量: {len(valid_links)}")
-
+    print(f"\n✔️ 有效订阅链接数量: {len(valid_links)}")
     with open("valid_links.txt", "w") as f:
         for link in valid_links:
             f.write(link + "\n")
     print("📄 已保存到 valid_links.txt")
 
-    await send_to_telegram(BOT_TOKEN, CHANNEL_ID, valid_links)
+    if BOT_TOKEN and CHANNEL_ID:
+        await send_to_telegram(BOT_TOKEN, CHANNEL_ID, valid_links)
 
 if __name__ == "__main__":
     asyncio.run(main())
