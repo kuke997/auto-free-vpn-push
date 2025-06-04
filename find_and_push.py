@@ -10,20 +10,6 @@ import urllib.parse
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-STATIC_SUBSCRIBE_URLS = [
-    "https://wanmeiwl3.xyz/gywl/4e3979fc330fc6b7806f3dc78a696f10",
-    "https://bestsub.bestrui.ggff.net/share/bestsub/cdcefaa4-1f0d-462e-ba76-627b344989f2/all.yaml",
-    "https://linuxdo.miaoqiqi.me/linuxdo/love",
-    "https://bh.jiedianxielou.workers.dev",
-    "https://raw.githubusercontent.com/mfuu/v2ray/master/clash.yaml",
-    "https://raw.githubusercontent.com/anaer/Sub/main/clash.yaml",
-    "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/clash.yml",
-    "https://cdn.jsdelivr.net/gh/vxiaov/free_proxies@main/clash/clash.provider.yaml",
-    "https://freenode.openrunner.net/uploads/20240617-clash.yaml",
-    "https://tt.vg/freeclash",
-    "https://raw.githubusercontent.com/SnapdragonLee/SystemProxy/master/dist/clash_config.yaml"
-]
-
 def validate_subscription(url):
     try:
         res = requests.get(url, timeout=10)
@@ -32,26 +18,6 @@ def validate_subscription(url):
     except:
         pass
     return False
-
-def search_github_clash_urls():
-    print("🔍 GitHub 搜索订阅文件中...")
-    try:
-        headers = {
-            "Accept": "application/vnd.github.v3.text-match+json"
-        }
-        query = "clash filename:clash.yaml in:path extension:yaml"
-        url = f"https://api.github.com/search/code?q={query}&per_page=100"
-        res = requests.get(url, headers=headers, timeout=15)
-        items = res.json().get("items", [])
-        links = []
-        for item in items:
-            raw_url = item["html_url"].replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
-            links.append(raw_url)
-        print(f"✨ GitHub 搜索到 {len(links)} 个可能的订阅链接")
-        return links
-    except Exception as e:
-        print("GitHub 搜索失败:", e)
-        return []
 
 def get_subscription_country_info(url):
     try:
@@ -148,26 +114,17 @@ async def main():
         print("环境变量 BOT_TOKEN 或 CHANNEL_ID 未设置")
         return
 
-    print("🔍 验证静态订阅链接...")
-    valid_static = [url for url in STATIC_SUBSCRIBE_URLS if validate_subscription(url)]
-
-    github_links = search_github_clash_urls()
-    print("🔍 验证 GitHub 搜索到的订阅链接...")
-    valid_dynamic = [url for url in github_links if validate_subscription(url)]
-
     nodefree_links = fetch_nodefree_links()
     print("🔍 验证 nodefree.net 获取到的链接...")
-    valid_nodefree = [url for url in nodefree_links if validate_subscription(url)]
+    valid_links = [url for url in nodefree_links if validate_subscription(url)]
 
-    all_valid = list(set(valid_static + valid_dynamic + valid_nodefree))
-    print(f"✔️ 共验证通过的有效订阅链接数量: {len(all_valid)}")
-
+    print(f"✔️ 有效订阅链接数量: {len(valid_links)}")
     with open("valid_links.txt", "w") as f:
-        for link in all_valid:
+        for link in valid_links:
             f.write(link + "\n")
     print("📄 已保存到 valid_links.txt")
 
-    await send_to_telegram(BOT_TOKEN, CHANNEL_ID, all_valid)
+    await send_to_telegram(BOT_TOKEN, CHANNEL_ID, valid_links)
 
 if __name__ == "__main__":
     asyncio.run(main())
