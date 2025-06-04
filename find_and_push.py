@@ -2,7 +2,6 @@ import os
 import re
 import asyncio
 import requests
-import yaml
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.constants import ParseMode
@@ -12,7 +11,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 BASE_URL = "https://nodefree.net"
-THREADS_LIST_URL = f"{BASE_URL}/latest"  # 这里以最新主题列表页为例
+THREADS_LIST_URL = BASE_URL  # 首页即为最新帖子列表
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -101,12 +100,12 @@ async def main():
     print("🌐 开始爬取 nodefree.net 最新文章列表...")
     all_yaml_links = set()
 
-    # 假设爬取前3页的主题列表（可根据需求调整）
+    # 假设爬取前3页的主题列表，nodefree.net 的分页格式是 /page/2
     for page_num in range(1, 4):
         if page_num == 1:
             url = THREADS_LIST_URL
         else:
-            url = THREADS_LIST_URL + f"?page={page_num}"
+            url = f"{BASE_URL}/page/{page_num}"
         print(f"➡️ 抓取列表页: {url}")
         threads = get_threads_on_page(url)
         print(f" 发现 {len(threads)} 篇文章")
