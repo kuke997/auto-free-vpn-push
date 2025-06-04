@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import requests
+from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.constants import ParseMode
 import urllib.parse
@@ -10,8 +11,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 BASE_URL = "https://nodefree.net"
-FIRST_PAGE_API = f"{BASE_URL}/latest.json"
-
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -19,61 +18,50 @@ HEADERS = {
     )
 }
 
-def get_threads_with_pagination():
+def get_threads_on_page(url):
     """
-    通过 Discourse API 递归获取所有主题，直到没有下一页
+    从 nodefree.net 列表页抓取文章链接
     """
-    threads = []
-    next_url = FIRST_PAGE_API
-
-    while next_url:
-        print(f"➡️ 抓取 API 页面: {next_url}")
-        try:
-            resp = requests.get(next_url, headers=HEADERS, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-
-            topics = data.get("topic_list", {}).get("topics", [])
-            print(f"  抓取到 {len(topics)} 个主题")
-            for topic in topics:
-                topic_id = topic.get("id")
-                slug = topic.get("slug")
-                if topic_id and slug:
-                    url = f"{BASE_URL}/t/{slug}/{topic_id}"
-                    threads.append(url)
-
-            # 获取下一页链接
-            more_topics_url = data.get("topic_list", {}).get("more_topics_url")
-            if more_topics_url:
-                # more_topics_url 格式: "/latest.json?no_definitions=true&ascending=false&since=xxx"
-                # 需要拼接 BASE_URL
-                next_url = BASE_URL + more_topics_url
-            else:
-                next_url = None
-
-        except Exception as e:
-            print(f"⚠️ 抓取API失败: {e}")
-            break
-
-    return threads
-
-def extract_yaml_links_from_thread(url):
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.raise_for_status()
-        text = resp.text
-        urls = re.findall(r'href="([^"]+\.ya?ml)"', text, re.I)
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        threads = []
+        # 文章链接一般是 <a href="/t/xxx-xxx/123" class="title">...</a> 或者 <h2 class="topic-title"> <a href=...>
+        # 根据实际页面结构，调整选择器：
+        for a in soup.select('a[href^="/t/"]'):
+            href = a.get("href")
+            if href and href.startswith("/t/"):
+                full_url = BASE_URL + href
+                threads.append(full_url)
+        # 去重
+        threads = list(set(threads))
+        return threads
+    except Exception as e:
+        print(f"⚠️ 获取列表页文章失败：{url}，错误：{e}")
+        return []
+
+def extract_yaml_links_from_thread(url):
+    """
+    从单篇文章页抓取所有 .yaml 配置链接
+    """
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
         links = set()
-        for href in urls:
-            if href.startswith("//"):
-                href = "https:" + href
-            elif href.startswith("/"):
-                href = BASE_URL + href
-            links.add(href)
-        print(f"   📝 {url} 找到 YAML 链接数量: {len(links)}")
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            if re.search(r"\.ya?ml$", href, re.I):
+                if href.startswith("//"):
+                    href = "https:" + href
+                elif href.startswith("/"):
+                    href = BASE_URL + href
+                links.add(href)
         return list(links)
     except Exception as e:
-        print(f"⚠️ 解析帖子页面失败：{url}，错误：{e}")
+        print(f"⚠️ 解析文章页面失败：{url}，错误：{e}")
         return []
 
 def validate_subscription(url):
@@ -119,15 +107,24 @@ async def main():
     if not BOT_TOKEN or not CHANNEL_ID:
         print("⚠️ 未设置 BOT_TOKEN 或 CHANNEL_ID，将跳过 Telegram 推送")
 
-    print("🌐 开始通过 Discourse API 爬取 nodefree.net 主题列表...")
-
-    threads = get_threads_with_pagination()
-    print(f"\n总共抓取到 {len(threads)} 篇主题")
+    print("🌐 开始爬取 nodefree.net 文章列表...")
 
     all_yaml_links = set()
-    for thread_url in threads:
-        yaml_links = extract_yaml_links_from_thread(thread_url)
-        all_yaml_links.update(yaml_links)
+
+    # 爬取首页 + 前3页（可根据需要调整）
+    for page in range(1, 5):
+        if page == 1:
+            url = BASE_URL + "/"
+        else:
+            url = f"{BASE_URL}/page/{page}"
+        print(f"➡️ 抓取列表页: {url}")
+        threads = get_threads_on_page(url)
+        print(f" 发现 {len(threads)} 篇文章")
+        for thread_url in threads:
+            print(f"   ↪️ 解析文章: {thread_url}")
+            yaml_links = extract_yaml_links_from_thread(thread_url)
+            print(f"      找到 {len(yaml_links)} 个 YAML 链接")
+            all_yaml_links.update(yaml_links)
 
     print(f"\n🔍 验证订阅链接有效性，共 {len(all_yaml_links)} 个链接")
     valid_links = []
