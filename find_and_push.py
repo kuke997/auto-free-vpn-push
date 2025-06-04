@@ -28,12 +28,11 @@ def get_threads_on_page(url):
         soup = BeautifulSoup(resp.text, "html.parser")
 
         threads = []
-        # 文章链接一般是 <a href="/t/xxx-xxx/123" class="title">...</a> 或者 <h2 class="topic-title"> <a href=...>
-        # 根据实际页面结构，调整选择器：
-        for a in soup.select('a[href^="/t/"]'):
+        # 文章链接格式为 /p/数字.html
+        for a in soup.find_all("a", href=True):
             href = a.get("href")
-            if href and href.startswith("/t/"):
-                full_url = BASE_URL + href
+            if href and re.match(r"^/p/\d+\.html$", href):
+                full_url = urllib.parse.urljoin(BASE_URL, href)
                 threads.append(full_url)
         # 去重
         threads = list(set(threads))
@@ -57,7 +56,7 @@ def extract_yaml_links_from_thread(url):
                 if href.startswith("//"):
                     href = "https:" + href
                 elif href.startswith("/"):
-                    href = BASE_URL + href
+                    href = urllib.parse.urljoin(BASE_URL, href)
                 links.add(href)
         return list(links)
     except Exception as e:
