@@ -1,7 +1,7 @@
 import os
 import re
-import requests
 import asyncio
+import requests
 import yaml
 from bs4 import BeautifulSoup
 from telegram import Bot
@@ -12,80 +12,53 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 BASE_URL = "https://nodefree.net"
+THREADS_LIST_URL = f"{BASE_URL}/latest"  # 这里以最新主题列表页为例
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+}
 
-def extract_sub_links_from_page(url):
+def get_threads_on_page(url):
     """
-    从一个网页中提取所有带 .yaml .yml 或包含 clash 的链接，返回列表
+    获取指定列表页中所有文章链接
     """
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, 'html.parser')
+        soup = BeautifulSoup(resp.text, "html.parser")
+        threads = []
+        # 文章链接一般是 <a class="title" href="/t/xxx">xxx</a>
+        for a in soup.select("a.title[href^='/t/']"):
+            href = a.get("href")
+            full_url = BASE_URL + href
+            threads.append(full_url)
+        return threads
+    except Exception as e:
+        print(f"⚠️ 获取列表页文章失败：{url}，错误：{e}")
+        return []
 
-        found_links = set()
+def extract_yaml_links_from_thread(url):
+    """
+    从单个文章页面抓取所有 .yaml / .yml 配置链接
+    """
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        links = set()
         for a in soup.find_all("a", href=True):
             href = a["href"].strip()
-            if re.search(r"\.ya?ml", href, re.I) or re.search(r"clash", href, re.I):
+            if re.search(r"\.ya?ml$", href, re.I):
                 if href.startswith("//"):
                     href = "https:" + href
                 elif href.startswith("/"):
                     href = BASE_URL + href
-                found_links.add(href)
-        return list(found_links)
+                links.add(href)
+        return list(links)
     except Exception as e:
-        print(f"⚠️ 从页面 {url} 提取订阅链接失败: {e}")
+        print(f"⚠️ 解析文章页面失败：{url}，错误：{e}")
         return []
-
-
-def fetch_nodefree_links():
-    """
-    抓取 nodefree.net 首页，先提取主页的所有可能链接，
-    如果是配置文件链接（直接.yaml），直接加入结果，
-    如果是网页，进一步访问解析里面的配置文件链接
-    """
-    print("🌐 正在抓取 nodefree.net 首页所有可能的订阅链接...")
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        resp = requests.get(BASE_URL, headers=headers, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, 'html.parser')
-
-        candidate_links = set()
-
-        # 先从首页提取所有a链接，找含.yaml/.yml或clash的链接（网页和文件均可能）
-        for a in soup.find_all("a", href=True):
-            href = a["href"].strip()
-            if re.search(r"\.ya?ml", href, re.I) or re.search(r"clash", href, re.I):
-                if href.startswith("//"):
-                    href = "https:" + href
-                elif href.startswith("/"):
-                    href = BASE_URL + href
-                candidate_links.add(href)
-
-        print(f"🏷 首页共发现 {len(candidate_links)} 个可能的订阅链接或网页")
-
-        # 进一步分类
-        final_links = set()
-
-        for link in candidate_links:
-            # 判断是不是直接.yaml文件链接
-            if re.search(r"\.ya?ml$", link, re.I):
-                final_links.add(link)
-            else:
-                # 不是直接配置文件，可能是网页，访问它，解析里面的订阅链接
-                print(f"🔎 访问网页 {link}，尝试提取内部订阅链接")
-                inner_links = extract_sub_links_from_page(link)
-                for l in inner_links:
-                    final_links.add(l)
-
-        print(f"✅ 总共最终订阅链接数量：{len(final_links)}")
-        return list(final_links)
-    except Exception as e:
-        print("❌ 抓取失败:", e)
-        return []
-
 
 def validate_subscription(url):
     try:
@@ -93,49 +66,22 @@ def validate_subscription(url):
         if res.status_code != 200:
             return False
         text = res.text.lower()
+        # 简单判断是不是有效配置
         if "proxies" in text or "vmess://" in text or "ss://" in text or "clash" in text:
             return True
         return False
     except Exception:
         return False
 
-
-def get_subscription_country_info(url):
-    try:
-        res = requests.get(url, timeout=10)
-        if res.status_code != 200:
-            return None
-        data = yaml.safe_load(res.text)
-        proxies = data.get("proxies", [])
-        countries = set()
-        for proxy in proxies:
-            country = proxy.get("country") or proxy.get("region")
-            if country and isinstance(country, str) and len(country) <= 5:
-                countries.add(country.strip())
-                continue
-            name = proxy.get("name") or proxy.get("remark") or proxy.get("remarks")
-            if name and isinstance(name, str) and len(name) >= 2:
-                countries.add(name[:2].strip())
-        return ", ".join(sorted(countries)) if countries else None
-    except Exception as e:
-        print(f"⚠️ 地区解析失败: {url}, 错误: {e}")
-        return None
-
-
 async def send_to_telegram(bot_token, channel_id, urls):
     if not urls:
         print("❌ 没有可用节点，跳过推送")
         return
 
-    text = "🆕 <b>2025年最新免费VPN节点合集（Clash/V2Ray/SS）</b>\n\n"
+    text = "🆕 <b>2025年 nodefree.net 免费VPN订阅合集（Clash/V2Ray/SS）</b>\n\n"
     for i, url in enumerate(urls[:20], start=1):
-        country_info = get_subscription_country_info(url)
-        if country_info:
-            country_info = f"（地区: {country_info}）"
-        else:
-            country_info = ""
         safe_url = urllib.parse.quote(url, safe=":/?=&")
-        text += f"👉 <a href=\"{safe_url}\">{url}</a> {country_info}\n\n"
+        text += f"👉 <a href=\"{safe_url}\">{url}</a>\n\n"
 
     if len(text.encode("utf-8")) > 4000:
         text = text.encode("utf-8")[:4000].decode("utf-8", errors="ignore") + "\n..."
@@ -147,15 +93,32 @@ async def send_to_telegram(bot_token, channel_id, urls):
     except Exception as e:
         print("❌ 推送失败:", e)
 
-
 async def main():
     if not BOT_TOKEN or not CHANNEL_ID:
         print("❌ 未设置 BOT_TOKEN 或 CHANNEL_ID")
         return
 
-    links = fetch_nodefree_links()
-    print("🔍 验证订阅链接...")
-    valid_links = [url for url in links if validate_subscription(url)]
+    print("🌐 开始爬取 nodefree.net 最新文章列表...")
+    all_yaml_links = set()
+
+    # 假设爬取前3页的主题列表（可根据需求调整）
+    for page_num in range(1, 4):
+        if page_num == 1:
+            url = THREADS_LIST_URL
+        else:
+            url = THREADS_LIST_URL + f"?page={page_num}"
+        print(f"➡️ 抓取列表页: {url}")
+        threads = get_threads_on_page(url)
+        print(f" 发现 {len(threads)} 篇文章")
+
+        for thread_url in threads:
+            print(f"   ↪️ 解析文章: {thread_url}")
+            yaml_links = extract_yaml_links_from_thread(thread_url)
+            print(f"      找到 {len(yaml_links)} 个 YAML 链接")
+            all_yaml_links.update(yaml_links)
+
+    print(f"🔍 验证订阅链接有效性，共 {len(all_yaml_links)} 个")
+    valid_links = [url for url in all_yaml_links if validate_subscription(url)]
     print(f"✔️ 有效订阅链接数量: {len(valid_links)}")
 
     with open("valid_links.txt", "w") as f:
@@ -164,7 +127,6 @@ async def main():
     print("📄 已保存到 valid_links.txt")
 
     await send_to_telegram(BOT_TOKEN, CHANNEL_ID, valid_links)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
