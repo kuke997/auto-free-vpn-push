@@ -7,39 +7,42 @@ from telegram import Bot
 from telegram.constants import ParseMode
 import urllib.parse
 
+# Telegram Bot 配置，建议用环境变量传入
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 BASE_URL = "https://nodefree.net"
-THREADS_LIST_URL = BASE_URL  # 首页即为最新帖子列表
-
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+    )
 }
 
 def get_threads_on_page(url):
     """
-    获取指定列表页中所有文章链接
+    抓取列表页所有文章链接，返回完整URL列表（去重）
+    只抓取 href 形如 /t/xxx 或 /t/xxx/数字 的链接
     """
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
-        threads = []
-        # 文章链接一般是 <a class="title" href="/t/xxx">xxx</a>
-        for a in soup.select("a.title[href^='/t/']"):
+        threads = set()
+        for a in soup.select("a[href^='/t/']"):
             href = a.get("href")
-            full_url = BASE_URL + href
-            threads.append(full_url)
-        return threads
+            if href and re.match(r"^/t/[^/]+(/[\d]+)?$", href):
+                full_url = BASE_URL + href
+                threads.add(full_url)
+        return list(threads)
     except Exception as e:
         print(f"⚠️ 获取列表页文章失败：{url}，错误：{e}")
         return []
 
 def extract_yaml_links_from_thread(url):
     """
-    从单个文章页面抓取所有 .yaml / .yml 配置链接
+    解析单个文章页面，提取所有以 .yaml/.yml 结尾的链接
+    自动补全相对URL为绝对URL
     """
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
@@ -49,6 +52,7 @@ def extract_yaml_links_from_thread(url):
         for a in soup.find_all("a", href=True):
             href = a["href"].strip()
             if re.search(r"\.ya?ml$", href, re.I):
+                # 补全链接
                 if href.startswith("//"):
                     href = "https:" + href
                 elif href.startswith("/"):
@@ -60,19 +64,25 @@ def extract_yaml_links_from_thread(url):
         return []
 
 def validate_subscription(url):
+    """
+    简单校验订阅链接是否有效
+    通过访问内容包含常见VPN关键词判断
+    """
     try:
         res = requests.get(url, timeout=10)
         if res.status_code != 200:
             return False
         text = res.text.lower()
-        # 简单判断是不是有效配置
-        if "proxies" in text or "vmess://" in text or "ss://" in text or "clash" in text:
+        if any(k in text for k in ("proxies", "vmess://", "ss://", "clash")):
             return True
         return False
     except Exception:
         return False
 
 async def send_to_telegram(bot_token, channel_id, urls):
+    """
+    通过 Telegram Bot 发送订阅链接合集消息
+    """
     if not urls:
         print("❌ 没有可用节点，跳过推送")
         return
@@ -82,12 +92,18 @@ async def send_to_telegram(bot_token, channel_id, urls):
         safe_url = urllib.parse.quote(url, safe=":/?=&")
         text += f"👉 <a href=\"{safe_url}\">{url}</a>\n\n"
 
+    # 限制消息长度，避免被截断
     if len(text.encode("utf-8")) > 4000:
         text = text.encode("utf-8")[:4000].decode("utf-8", errors="ignore") + "\n..."
 
     bot = Bot(token=bot_token)
     try:
-        await bot.send_message(chat_id=channel_id, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        await bot.send_message(
+            chat_id=channel_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
         print("✅ 推送成功")
     except Exception as e:
         print("❌ 推送失败:", e)
@@ -100,12 +116,12 @@ async def main():
     print("🌐 开始爬取 nodefree.net 最新文章列表...")
     all_yaml_links = set()
 
-    # 假设爬取前3页的主题列表，nodefree.net 的分页格式是 /page/2
+    # 抓取 /latest 及其分页 /latest/page/2, /latest/page/3
     for page_num in range(1, 4):
         if page_num == 1:
-            url = THREADS_LIST_URL
+            url = f"{BASE_URL}/latest"
         else:
-            url = f"{BASE_URL}/page/{page_num}"
+            url = f"{BASE_URL}/latest/page/{page_num}"
         print(f"➡️ 抓取列表页: {url}")
         threads = get_threads_on_page(url)
         print(f" 发现 {len(threads)} 篇文章")
