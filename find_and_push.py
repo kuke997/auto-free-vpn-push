@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 import asyncio
 import yaml
@@ -19,78 +20,72 @@ def fetch_nodefree_links():
         resp = requests.get(base_url, headers=headers, timeout=15)
         soup = BeautifulSoup(resp.text, 'html.parser')
 
+        # 查找第一篇包含“节点”或“订阅”的文章链接
         post_link = None
-        for a in soup.find_all('a', href=True):
-            if "免费" in a.text and ("节点" in a.text or "订阅" in a.text):
-                post_link = a["href"]
+        for a in soup.select("h2.entry-title > a"):
+            if "节点" in a.text or "订阅" in a.text:
+                post_link = a['href']
                 break
 
         if not post_link:
-            print("❌ 没有找到最新节点文章")
+            print("❌ 没有找到节点文章")
             return []
 
-        full_url = post_link if post_link.startswith("http") else base_url + post_link
-        res = requests.get(full_url, headers=headers, timeout=15)
+        print("🔗 找到文章：", post_link)
+        res = requests.get(post_link, headers=headers, timeout=15)
         soup = BeautifulSoup(res.text, 'html.parser')
-
+        text = soup.get_text()
         found_links = set()
+
+        # 提取网页内所有 a 标签的 href 链接
         for a in soup.find_all("a", href=True):
             href = a["href"].strip()
-            if any(proto in href for proto in [".yaml", ".yml", "vmess://", "ss://", "trojan://", "clash://"]):
+            if re.search(r"(http.*\.(yaml|yml|txt))", href):
                 found_links.add(href)
 
-        found_links = list(found_links)
-        print(f"📥 nodefree.net 提取到 {len(found_links)} 个订阅链接")
-        return found_links
+        # 再次检查正文中直接包含的链接文本（如 vmess://, ss:// 等）
+        link_matches = re.findall(r'(https?://[^\s"\']+|vmess://[^\s"\']+|ss://[^\s"\']+)', text)
+        for l in link_matches:
+            if any(x in l for x in ['yaml', 'yml', 'txt', 'vmess://', 'ss://']):
+                found_links.add(l.strip())
+
+        links = list(found_links)
+        print(f"📥 nodefree.net 提取到 {len(links)} 个订阅链接")
+        return links
     except Exception as e:
-        print("❌ 抓取 nodefree.net 失败:", e)
+        print("❌ 抓取失败:", e)
         return []
 
 
 def validate_subscription(url):
     try:
-        if url.startswith("http"):
-            res = requests.get(url, timeout=10)
-            if res.status_code == 200 and "proxies" in res.text:
-                return True
+        res = requests.get(url, timeout=10)
+        return res.status_code == 200 and (
+            "proxies" in res.text or "vmess://" in res.text or "ss://" in res.text
+        )
     except:
-        pass
-    return False
+        return False
 
 
 def get_subscription_country_info(url):
     try:
-        if not url.startswith("http"):
-            return None
         res = requests.get(url, timeout=10)
         if res.status_code != 200:
             return None
-
         data = yaml.safe_load(res.text)
         proxies = data.get("proxies", [])
         countries = set()
-
         for proxy in proxies:
-            country = proxy.get("country")
+            country = proxy.get("country") or proxy.get("region")
             if country and isinstance(country, str) and len(country) <= 5:
                 countries.add(country.strip())
                 continue
-
-            region = proxy.get("region")
-            if region and isinstance(region, str) and len(region) <= 5:
-                countries.add(region.strip())
-                continue
-
             name = proxy.get("name") or proxy.get("remark") or proxy.get("remarks")
             if name and isinstance(name, str) and len(name) >= 2:
                 countries.add(name[:2].strip())
-
-        if countries:
-            return ", ".join(sorted(countries))
-        else:
-            return None
+        return ", ".join(sorted(countries)) if countries else None
     except Exception as e:
-        print(f"解析节点地区失败：{url}，错误：{e}")
+        print(f"⚠️ 地区解析失败: {url}, 错误: {e}")
         return None
 
 
@@ -99,18 +94,17 @@ async def send_to_telegram(bot_token, channel_id, urls):
         print("❌ 没有可用节点，跳过推送")
         return
 
-    text = "🆕 <b>2025年最新Clash订阅节点 免费vpn节点Clash/V2Ray/Shadowsocks/Vmess订阅更新</b>\n\n"
+    text = "🆕 <b>2025年最新免费VPN节点合集（Clash/V2Ray/SS）</b>\n\n"
     for i, url in enumerate(urls[:20], start=1):
         country_info = get_subscription_country_info(url)
         if country_info:
-            country_info = f"（节点地区: {country_info}）"
+            country_info = f"（地区: {country_info}）"
         else:
             country_info = ""
-
         safe_url = urllib.parse.quote(url, safe=":/?=&")
-        text += f"👉 <a href=\"{safe_url}\">{url}</a> {country_info}\n（可长按复制，或粘贴到 Clash / Shadowrocket 导入）\n\n"
+        text += f"👉 <a href=\"{safe_url}\">{url}</a> {country_info}\n\n"
 
-    if len(text.encode('utf-8')) > 4000:
+    if len(text.encode("utf-8")) > 4000:
         text = text.encode("utf-8")[:4000].decode("utf-8", errors="ignore") + "\n..."
 
     bot = Bot(token=bot_token)
@@ -123,7 +117,7 @@ async def send_to_telegram(bot_token, channel_id, urls):
 
 async def main():
     if not BOT_TOKEN or not CHANNEL_ID:
-        print("环境变量 BOT_TOKEN 或 CHANNEL_ID 未设置")
+        print("❌ 未设置 BOT_TOKEN 或 CHANNEL_ID")
         return
 
     links = fetch_nodefree_links()
