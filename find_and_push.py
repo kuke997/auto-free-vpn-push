@@ -7,6 +7,7 @@ from telegram import Bot
 from telegram.constants import ParseMode
 from urllib.parse import urljoin, quote
 
+# 从环境变量读取 Telegram Bot Token 和频道 ID
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
@@ -18,29 +19,31 @@ HEADERS = {
     )
 }
 
-def get_threads_via_sitemap():
+def get_threads_via_rss():
     """
-    从 https://nodefree.net/sitemap.xml 提取所有 <loc>，
-    筛选出形如 https://nodefree.net/p/数字.html 的文章链接
+    通过 RSS（latest.rss）获取 nodefree.net 最近发布的帖子链接
     """
-    sitemap_url = BASE_URL + "/sitemap.xml"
+    rss_url = BASE_URL + "/latest.rss"
     try:
-        resp = requests.get(sitemap_url, headers=HEADERS, timeout=15)
+        resp = requests.get(rss_url, headers=HEADERS, timeout=15)
         resp.raise_for_status()
-        xml_text = resp.text
-        # 匹配所有 <loc>…</loc> 中间的 URL
-        locs = re.findall(r"<loc>(.*?)</loc>", xml_text)
-        # 只保留 /p/数字.html 格式
-        threads = [u for u in locs if re.match(rf"{re.escape(BASE_URL)}/p/\d+\.html$", u)]
-        print(f"✅ 从 sitemap.xml 找到 {len(threads)} 篇文章")
-        return threads
+        xml = resp.text
+        # 用正则提取所有 <link>https://nodefree.net/p/数字.html</link>
+        links = re.findall(r"<link>(https://nodefree\.net/p/\d+\.html)</link>", xml)
+        # RSS 中第一个 <link> 通常是站点链接，items 在后面；strip 重复并返回唯一列表
+        unique_links = []
+        for link in links:
+            if link not in unique_links:
+                unique_links.append(link)
+        print(f"✅ RSS 共提取到 {len(unique_links)} 条帖子链接")
+        return unique_links
     except Exception as e:
-        print(f"⚠️ 获取 sitemap 失败: {e}")
+        print(f"⚠️ 获取 RSS 失败: {e}")
         return []
 
 def extract_yaml_links_from_thread(url):
     """
-    从单个文章页面抓取所有以 .yaml 或 .yml 结尾的链接
+    访问单篇帖子页面，提取其中所有以 .yaml 或 .yml 结尾的链接
     """
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
@@ -50,7 +53,7 @@ def extract_yaml_links_from_thread(url):
         for a in soup.find_all("a", href=True):
             href = a["href"].strip()
             if re.search(r"\.ya?ml$", href, re.I):
-                # 补齐相对链接
+                # 补全相对链接
                 if href.startswith("//"):
                     href = "https:" + href
                 elif href.startswith("/"):
@@ -59,17 +62,17 @@ def extract_yaml_links_from_thread(url):
         print(f"   📝 {url} 找到 {len(links)} 个 YAML 链接")
         return list(links)
     except Exception as e:
-        print(f"⚠️ 解析文章页面失败：{url}，错误：{e}")
+        print(f"⚠️ 解析帖子失败: {url}，错误: {e}")
         return []
 
 def validate_subscription(url):
     """
-    验证订阅链接是否有效（通过内容中包含 proxies/vmess/ss/clash 判断）
+    验证订阅链接内容是否包含常见配置关键词
     """
     try:
         res = requests.get(url, timeout=10)
         if res.status_code != 200:
-            print(f"    ❌ 验证失败 (HTTP {res.status_code}): {url}")
+            print(f"    ❌ HTTP {res.status_code}: {url}")
             return False
         text = res.text.lower()
         valid = any(k in text for k in ("proxies", "vmess://", "ss://", "clash"))
@@ -81,7 +84,7 @@ def validate_subscription(url):
 
 async def send_to_telegram(bot_token, channel_id, urls):
     """
-    通过 Telegram Bot 发送有效的订阅链接
+    将有效链接通过 Telegram Bot 推送到指定频道／聊天
     """
     if not urls:
         print("❌ 无有效链接，跳过推送")
@@ -92,7 +95,7 @@ async def send_to_telegram(bot_token, channel_id, urls):
         safe_url = quote(url, safe=":/?=&")
         text += f"👉 <a href=\"{safe_url}\">{url}</a>\n\n"
 
-    # 避免超过 4096 字节限制
+    # 确保不超过 Telegram 消息长度限制
     text = text[:3900]
 
     bot = Bot(token=bot_token)
@@ -108,24 +111,30 @@ async def send_to_telegram(bot_token, channel_id, urls):
         print(f"❌ Telegram 推送失败: {e}")
 
 async def main():
-    print("🌐 开始通过 Sitemap 爬取 nodefree.net 文章列表...")
-    threads = get_threads_via_sitemap()  # 获取所有文章链接
-    print(f"总共抓取到 {len(threads)} 篇文章\n")
+    # 一开始打印日志，帮助调试
+    print("🌐 开始通过 RSS (latest.rss) 爬取 nodefree.net 文章列表…")
 
+    # 1. 从 RSS 提取帖子链接
+    threads = get_threads_via_rss()
+    print(f"总共拿到 {len(threads)} 条帖子链接\n")
+
+    # 2. 依次访问每条帖子并收集 .yaml 链接
     all_yaml_links = set()
     for thread_url in threads:
         yaml_links = extract_yaml_links_from_thread(thread_url)
         all_yaml_links.update(yaml_links)
 
-    print(f"\n🔍 开始验证 {len(all_yaml_links)} 条订阅链接")
+    print(f"\n🔍 开始验证 {len(all_yaml_links)} 条可能的订阅链接…")
     valid_links = [u for u in all_yaml_links if validate_subscription(u)]
-    print(f"\n✔️ 有效订阅链接数量: {len(valid_links)}")
+    print(f"\n✔️ 共 {len(valid_links)} 条有效订阅链接")
 
+    # 3. 保存到 valid_links.txt
     with open("valid_links.txt", "w") as f:
         for link in valid_links:
             f.write(link + "\n")
     print("📄 已保存到 valid_links.txt")
 
+    # 4. 如果环境变量里配置了 BOT_TOKEN 和 CHANNEL_ID，就推送到 Telegram
     if BOT_TOKEN and CHANNEL_ID:
         await send_to_telegram(BOT_TOKEN, CHANNEL_ID, valid_links)
 
