@@ -35,7 +35,6 @@ def get_threads_on_page(page):
     """
     从 nodefree.net 列表页中提取所有文章链接
     """
-    # 修正分页URL格式
     if page == 1:
         url = BASE_URL
     else:
@@ -47,46 +46,32 @@ def get_threads_on_page(page):
         resp = requests.get(url, headers=HEADERS, timeout=20)
         resp.raise_for_status()
         
-        # 使用BeautifulSoup解析HTML
         soup = BeautifulSoup(resp.text, 'html.parser')
         threads = []
         
-        # 查找所有文章链接 - 根据当前网站结构调整
-        # 尝试多种选择器以确保找到文章链接
-        selectors = [
-            'a.list-group-item',  # 原始选择器
-            'div.topic-list-item a.title',  # 备选选择器1
-            'article a[href^="/p/"]',  # 备选选择器2
-            'a[href*="/p/"]'  # 通用选择器
-        ]
+        # 查找所有文章链接 - 更精确的选择器
+        article_links = soup.select('a.list-group-item')
+        if not article_links:
+            # 备用选择器
+            article_links = soup.select('a[href*="/p/"]')
         
-        for selector in selectors:
-            links = soup.select(selector)
-            for link in links:
-                href = link.get('href')
-                if href and '/p/' in href:
-                    full_url = urljoin(BASE_URL, href)
-                    if full_url not in threads:
-                        threads.append(full_url)
-            if threads:
-                break
+        for link in article_links:
+            href = link.get('href')
+            if href and '/p/' in href:
+                full_url = urljoin(BASE_URL, href)
+                if full_url not in threads:
+                    threads.append(full_url)
         
         logger.info(f"✅ 找到 {len(threads)} 篇文章")
         return threads
     
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 404:
-            logger.warning(f"⚠️ 页面不存在: {url}")
-        else:
-            logger.error(f"⚠️ HTTP错误 {e.response.status_code}: {url}")
-        return []
     except Exception as e:
         logger.error(f"⚠️ 获取页面失败 {url} 错误: {str(e)}")
         return []
 
 def extract_yaml_links_from_thread(url):
     """
-    从单个文章页面中提取所有订阅链接
+    从单个文章页面中提取所有订阅链接 - 修复版
     """
     logger.info(f"📝 正在解析文章: {url}")
     
@@ -94,46 +79,81 @@ def extract_yaml_links_from_thread(url):
         resp = requests.get(url, headers=HEADERS, timeout=20)
         resp.raise_for_status()
         
-        # 使用BeautifulSoup解析HTML
         soup = BeautifulSoup(resp.text, 'html.parser')
         links = set()
         
-        # 提取所有可能的订阅链接
+        # 只提取特定类型的链接，避免文章链接
+        domains = [
+            'githubrowcontent', 'github.io', 'sub-store', 
+            'subscribe', 'clash', 'v2ray', 'youlink',
+            'raw.githubusercontent.com', 'cdn.jsdelivr.net'
+        ]
+        
+        # 1. 查找所有链接元素
         for a_tag in soup.find_all('a', href=True):
             href = a_tag['href']
             
-            # 匹配.yaml/.yml文件
-            if re.search(r'\.ya?ml$', href, re.I):
+            # 跳过讨论主题链接
+            if '/t/' in href or '/p/' in href:
+                continue
+                
+            # 检查是否是订阅链接
+            if any(ext in href for ext in ['.yaml', '.yml', '.txt']):
                 links.add(href)
             
-            # 匹配.txt文件
-            elif re.search(r'\.txt$', href, re.I):
+            # 检查是否包含特定域名
+            elif any(domain in href for domain in domains):
                 links.add(href)
+        
+        # 2. 查找内容中的直接链接
+        content = soup.select_one('div.content') or soup.select_one('div.post-content')
+        if content:
+            # 更精确的正则表达式匹配订阅链接
+            text_links = re.findall(r'https?://[^\s"\']+?\.(?:ya?ml|txt)\b', content.text, re.I)
+            links.update(text_links)
             
-            # 匹配常见订阅服务域名
-            elif any(domain in href for domain in 
-                    ['githubrowcontent', 'github.io', 'sub-store', 'subscribe', 'clash', 'v2ray', 'youlink']):
-                links.add(href)
+            # 匹配特定域名的链接
+            domain_pattern = r'https?://(?:{})[^\s"\']+'.format('|'.join(domains))
+            domain_links = re.findall(domain_pattern, content.text, re.I)
+            links.update(domain_links)
         
-        # 检查文章内容中的直接链接
-        content_selectors = ['div.content', 'div.article-content', 'div.post-content']
-        for selector in content_selectors:
-            content = soup.select_one(selector)
-            if content:
-                text_links = re.findall(r'https?://[^\s"\']+', content.text)
-                for link in text_links:
-                    if any(ext in link for ext in ['.yaml', '.yml', '.txt', 'sub-store', 'clash', 'v2ray']):
-                        links.add(link)
-        
-        # 检查代码块中的链接
+        # 3. 查找代码块中的订阅链接
         for code_block in soup.select('pre, code'):
-            code_links = re.findall(r'https?://[^\s"\']+', code_block.text)
-            for link in code_links:
-                if any(ext in link for ext in ['.yaml', '.yml', '.txt']):
-                    links.add(link)
+            code_text = code_block.get_text()
+            # 匹配常见的订阅格式
+            config_links = re.findall(
+                r'https?://[^\s"\']+?\.(?:ya?ml|txt)\b', 
+                code_text, 
+                re.I
+            )
+            links.update(config_links)
+            
+            # 匹配base64编码的订阅链接
+            base64_links = re.findall(
+                r'(?:ss|ssr|vmess|trojan)://[a-zA-Z0-9+/]+={0,2}', 
+                code_text
+            )
+            links.update(base64_links)
         
-        logger.info(f"   🔗 提取到 {len(links)} 个订阅链接")
-        return list(links)
+        # 过滤掉无效链接
+        filtered_links = set()
+        for link in links:
+            # 跳过讨论主题链接
+            if '/t/' in link or '/p/' in link:
+                continue
+                
+            # 确保是完整URL
+            if link.startswith('//'):
+                link = 'https:' + link
+            elif link.startswith('/'):
+                link = urljoin(BASE_URL, link)
+                
+            # 确保是HTTP/HTTPS协议
+            if link.startswith('http'):
+                filtered_links.add(link)
+        
+        logger.info(f"   🔗 提取到 {len(filtered_links)} 个订阅链接")
+        return list(filtered_links)
     
     except Exception as e:
         logger.error(f"⚠️ 解析帖子失败 {url} 错误: {str(e)}")
@@ -141,19 +161,18 @@ def extract_yaml_links_from_thread(url):
 
 def validate_subscription(url):
     """
-    验证订阅链接是否有效
+    验证订阅链接是否有效 - 更严格的验证
     """
     logger.info(f"🔐 正在验证链接: {url}")
     
     try:
-        # 添加随机延迟避免被封
         time.sleep(random.uniform(0.5, 1.5))
         
         # 处理可能的相对URL
         if url.startswith('//'):
             url = 'https:' + url
-        elif url.startswith('/'):
-            url = urljoin(BASE_URL, url)
+        elif not url.startswith('http'):
+            url = 'https://' + url
             
         res = requests.get(url, headers=HEADERS, timeout=15)
         if res.status_code != 200:
@@ -161,10 +180,21 @@ def validate_subscription(url):
             return False
         
         content = res.text
-        # 检查常见VPN配置关键词
-        if any(keyword in content.lower() for keyword in 
-               ["proxies", "proxy-providers", "vmess", "ss://", "trojan", "vless", "clash"]):
-            logger.info(f"    ✔️ 有效订阅: {url}")
+        
+        # 更严格的VPN配置检测
+        vpn_keywords = [
+            "proxies:", "proxy-providers:", "vmess://", "ss://", 
+            "trojan://", "vless://", "clash:", "port:"
+        ]
+        
+        for keyword in vpn_keywords:
+            if keyword in content.lower():
+                logger.info(f"    ✔️ 有效订阅: {url}")
+                return True
+        
+        # 检查base64编码的配置
+        if re.search(r'^[A-Za-z0-9+/]+={0,2}$', content.strip()):
+            logger.info(f"    ✔️ 有效订阅 (Base64编码): {url}")
             return True
         
         logger.warning(f"    ❌ 无效订阅 (无VPN配置): {url}")
@@ -176,25 +206,26 @@ def validate_subscription(url):
 
 async def send_to_telegram(bot_token, channel_id, urls):
     """
-    将有效订阅链接推送到 Telegram 频道
+    将有效订阅链接推送到 Telegram 频道 - 改进版
     """
     if not urls:
         logger.warning("❌ 无有效链接，跳过推送")
         return
     
     # 创建消息内容
-    text = "🆕 <b>NodeFree 最新免费VPN订阅合集</b>\n\n"
+    text = "🆕 <b>NodeFree 最新免费VPN订阅链接</b>\n\n"
     text += "更新时间: " + time.strftime("%Y-%m-%d %H:%M:%S") + "\n\n"
+    text += "以下是可直接导入VPN客户端的订阅链接：\n\n"
     
-    for i, u in enumerate(urls[:15], 1):
+    for i, u in enumerate(urls[:10], 1):
         safe = quote(u, safe=":/?=&")
         # 缩短显示的长链接
-        display_url = u
-        if len(u) > 50:
-            display_url = u[:30] + "..." + u[-20:]
-        text += f"{i}. <a href=\"{safe}\">{display_url}</a>\n"
+        display_url = u.split('/')[-1] if '/' in u else u  # 显示文件名部分
+        text += f"{i}. <code>{display_url}</code>\n"
+        text += f"   <a href=\"{safe}\">点击复制订阅链接</a>\n\n"
     
-    text += "\n⚠️ 仅供学习使用，请遵守当地法律法规"
+    text += "⚠️ 仅供学习使用，请遵守当地法律法规\n"
+    text += "🔒 订阅链接有效期通常为1-7天"
     
     # 控制消息长度
     if len(text) > 4096:
@@ -220,29 +251,36 @@ async def main():
     all_links = set()
     valid_links = []
     
-    # 爬取前3页内容
-    for page in range(1, 4):
+    # 爬取前2页内容即可
+    for page in range(1, 3):
         threads = get_threads_on_page(page)
         
         if not threads:
             logger.warning(f"⚠️ 第 {page} 页未找到文章，跳过")
             continue
             
-        # 随机延迟避免请求过快
         time.sleep(random.uniform(1, 3))
         
         for t in threads:
             subs = extract_yaml_links_from_thread(t)
             all_links.update(subs)
             
-            # 随机延迟避免请求过快
             time.sleep(random.uniform(0.5, 2))
     
     logger.info(f"\n🔍 共提取到 {len(all_links)} 条订阅链接，开始验证...")
     
+    # 优先验证特定类型的链接
     for link in all_links:
-        if validate_subscription(link):
-            valid_links.append(link)
+        # 优先验证.yaml/.yml链接
+        if any(ext in link for ext in ['.yaml', '.yml', '.txt']):
+            if validate_subscription(link):
+                valid_links.append(link)
+    
+    # 然后验证其他链接
+    for link in all_links:
+        if link not in valid_links:
+            if validate_subscription(link):
+                valid_links.append(link)
     
     logger.info(f"\n✔️ 验证完成！共 {len(valid_links)} 条有效订阅链接")
     
@@ -256,9 +294,11 @@ async def main():
         logger.warning("📄 无有效链接，不保存文件")
     
     # 发送到Telegram
-    if BOT_TOKEN and CHANNEL_ID:
+    if BOT_TOKEN and CHANNEL_ID and valid_links:
         logger.info("\n📤 正在推送结果到Telegram...")
         await send_to_telegram(BOT_TOKEN, CHANNEL_ID, valid_links)
+    elif valid_links:
+        logger.warning("\n❌ 未设置BOT_TOKEN或CHANNEL_ID，跳过推送")
     
     logger.info("\n✅ 任务完成！")
 
