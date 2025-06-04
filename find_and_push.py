@@ -7,7 +7,6 @@ from telegram import Bot
 from telegram.constants import ParseMode
 import urllib.parse
 
-# Telegram Bot 配置，建议用环境变量传入
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
@@ -20,15 +19,12 @@ HEADERS = {
 }
 
 def get_threads_on_page(url):
-    """
-    抓取列表页所有文章链接，返回完整URL列表（去重）
-    只抓取 href 形如 /t/xxx 或 /t/xxx/数字 的链接
-    """
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
         threads = set()
+        # 文章链接符合 /t/xxx 或 /t/xxx/数字 格式
         for a in soup.select("a[href^='/t/']"):
             href = a.get("href")
             if href and re.match(r"^/t/[^/]+(/[\d]+)?$", href):
@@ -40,10 +36,6 @@ def get_threads_on_page(url):
         return []
 
 def extract_yaml_links_from_thread(url):
-    """
-    解析单个文章页面，提取所有以 .yaml/.yml 结尾的链接
-    自动补全相对URL为绝对URL
-    """
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.raise_for_status()
@@ -52,7 +44,6 @@ def extract_yaml_links_from_thread(url):
         for a in soup.find_all("a", href=True):
             href = a["href"].strip()
             if re.search(r"\.ya?ml$", href, re.I):
-                # 补全链接
                 if href.startswith("//"):
                     href = "https:" + href
                 elif href.startswith("/"):
@@ -64,10 +55,6 @@ def extract_yaml_links_from_thread(url):
         return []
 
 def validate_subscription(url):
-    """
-    简单校验订阅链接是否有效
-    通过访问内容包含常见VPN关键词判断
-    """
     try:
         res = requests.get(url, timeout=10)
         if res.status_code != 200:
@@ -80,9 +67,6 @@ def validate_subscription(url):
         return False
 
 async def send_to_telegram(bot_token, channel_id, urls):
-    """
-    通过 Telegram Bot 发送订阅链接合集消息
-    """
     if not urls:
         print("❌ 没有可用节点，跳过推送")
         return
@@ -92,7 +76,6 @@ async def send_to_telegram(bot_token, channel_id, urls):
         safe_url = urllib.parse.quote(url, safe=":/?=&")
         text += f"👉 <a href=\"{safe_url}\">{url}</a>\n\n"
 
-    # 限制消息长度，避免被截断
     if len(text.encode("utf-8")) > 4000:
         text = text.encode("utf-8")[:4000].decode("utf-8", errors="ignore") + "\n..."
 
@@ -116,12 +99,12 @@ async def main():
     print("🌐 开始爬取 nodefree.net 最新文章列表...")
     all_yaml_links = set()
 
-    # 抓取 /latest 及其分页 /latest/page/2, /latest/page/3
+    # 抓取首页和前两页分页
     for page_num in range(1, 4):
         if page_num == 1:
-            url = f"{BASE_URL}/latest"
+            url = f"{BASE_URL}/"
         else:
-            url = f"{BASE_URL}/latest/page/{page_num}"
+            url = f"{BASE_URL}/page/{page_num}"
         print(f"➡️ 抓取列表页: {url}")
         threads = get_threads_on_page(url)
         print(f" 发现 {len(threads)} 篇文章")
