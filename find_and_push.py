@@ -26,14 +26,30 @@ FREEFQ_CATEGORY_URL = "https://freefq.com/free-ssr/"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
 
+# ---------------------- 辅助：判断是否为“真实订阅链接” ----------------------
+def is_subscription_link(link: str) -> bool:
+    """
+    只保留以下两类链接：
+      1. 以 ssr://、ss://、vmess://、trojan:// 协议开头
+      2. 以 .yaml、.yml、.txt、.json 等文件后缀结尾（后面可以带 ? 参数）
+    """
+    link = link.strip()
+    # 协议协议类
+    if re.match(r'^(ssr|ss|vmess|trojan)://', link):
+        return True
+    # 文件后缀类（后面可以带查询参数 ?）
+    if re.search(r'\.(yaml|yml|txt|json)(?:\?[^ ]*)?$', link):
+        return True
+    return False
+
+
 # ---------------------- 提取分类页文章链接 ----------------------
 async def extract_post_urls(asession):
     """
-    渲染分类页后，从 <a> 标签中提取所有 /free-ssr/xxx.html 格式的文章链接
+    渲染分类页后，提取所有 /free-ssr/xxx.html 格式的文章 URL
     """
     try:
         r = await asession.get(FREEFQ_CATEGORY_URL, headers={"User-Agent": USER_AGENT})
-        # sleep=2 给 JS 更多加载时间，timeout=30 以防网速慢
         await r.html.arender(timeout=30, sleep=2)
 
         post_urls = set()
@@ -41,10 +57,9 @@ async def extract_post_urls(asession):
             href = a.attrs.get('href', '').strip()
             # 只抓 /free-ssr/xxx.html 结尾的链接
             if href and '/free-ssr/' in href and href.endswith('.html'):
-                # 处理相对链接
                 full_url = href if href.startswith('http') else urljoin(FREEFQ_CATEGORY_URL, href)
                 post_urls.add(full_url)
-        logger.info(f"📰 在分类页共找到 {len(post_urls)} 篇文章")
+        logger.info(f"📰 分类页共找到 {len(post_urls)} 篇文章")
         return list(post_urls)
 
     except Exception as e:
@@ -52,98 +67,100 @@ async def extract_post_urls(asession):
         return []
 
 
-# ---------------------- 提取单篇文章中的订阅链接 ----------------------
-async def extract_links_from_post(asession, post_url):
+# ---------------------- 提取单篇文章中的“原始候选链接” ----------------------
+async def extract_raw_links_from_post(asession, post_url):
     """
-    渲染单个文章页后，从 HTML 源码、<a>、<code>、<pre> 中提取所有可能的订阅链接
+    渲染文章页后，从 HTML 源码、<a>、<code>、<pre> 中提取所有“候选订阅链接”，
+    但不做最终过滤，只是把所有可能含订阅信息的 URL/B64 都收集起来。
     """
-    links = set()
+    raw_links = set()
     try:
         r = await asession.get(post_url, headers={"User-Agent": USER_AGENT})
         await r.html.arender(timeout=30, sleep=2)
 
         html_source = r.html.html or ""
 
-        # 1. 从完整 HTML 源码用正则提取 http(s):// 格式的链接
+        # 1. 从完整 HTML 源码中提取所有 http(s)://... 格式
         for match in re.findall(r'https?://[^\s\'"<>()]+', html_source):
+            # 只要链接里含 “clash/v2ray/.yaml/.txt/subscribe” 就先收集
             if any(k in match for k in ['clash', 'v2ray', '.yaml', '.txt', 'subscribe']):
-                links.add(match.strip())
+                raw_links.add(match.strip())
 
-        # 2. 再从源码里提取 base64 格式节点（ssr://、ss://、vmess://、trojan://）
+        # 2. 从源码中提取 Base64 节点协议（ssr://、ss://、vmess://、trojan://）
         for m in re.finditer(r'(ssr|ss|vmess|trojan)://[A-Za-z0-9+/=]+', html_source):
-            links.add(m.group(0).strip())
+            raw_links.add(m.group(0).strip())
 
-        # 3. 单独遍历 <a> 标签，避免部分链接仅出现在 href 属性中
+        # 3. 遍历 <a> 标签的 href 属性
         for a in r.html.find('a'):
             href = a.attrs.get('href', '').strip()
             if href and any(k in href for k in ['clash', 'v2ray', '.yaml', '.txt', 'subscribe', 'ssr://', 'vmess://']):
                 full = href if href.startswith('http') else urljoin(post_url, href)
-                links.add(full.strip())
+                raw_links.add(full.strip())
 
-        # 4. 遍历 <code> 和 <pre> 块里的文本，补充提取被 JS/脚本写入文本中的节点
+        # 4. 遍历 <code> 和 <pre> 中的文本内容
         for block in r.html.find('code, pre'):
             text = block.text or ""
-            # 4.1 Base64 格式
+            # 4.1 提取 Base64 格式
             for m in re.finditer(r'(ssr|ss|vmess|trojan)://[A-Za-z0-9+/=]+', text):
-                links.add(m.group(0).strip())
-            # 4.2 http(s):// 格式
+                raw_links.add(m.group(0).strip())
+            # 4.2 提取 http(s):// 格式
             for match in re.findall(r'https?://[^\s\'"<>()]+', text):
                 if any(k in match for k in ['clash', 'v2ray', '.yaml', '.txt', 'subscribe']):
-                    links.add(match.strip())
+                    raw_links.add(match.strip())
 
-        logger.info(f"   🔗 文章 {post_url} 提取到 {len(links)} 条链接")
-        return list(links)
+        logger.info(f"   🔗 文章 {post_url} 共收集到 {len(raw_links)} 条候选链接")
+        return list(raw_links)
 
     except Exception as e:
-        logger.error(f"❌ 提取文章 {post_url} 链接失败: {str(e)}")
+        logger.error(f"❌ 提取文章 {post_url} 候选链接失败: {str(e)}")
         return []
 
 
-# ---------------------- 验证订阅链接有效性 ----------------------
-def validate_subscription(url: str) -> bool:
+# ---------------------- 验证与筛选“真实订阅链接” ----------------------
+def filter_and_validate_links(raw_links):
     """
-    同步检验 URL 是否有效订阅链接：
-      1. HTTP 状态码 200
-      2. 页面或返回体包含常见关键词（proxies、vmess、ss://、trojan、vless、clash 等）
-      3. 或者整条返回体是纯 Base64 字符串
+    1. 先筛选 is_subscription_link()==True 的链接
+    2. 再用 HTTP/内容检查，留下真正有效的订阅
     """
-    try:
-        time.sleep(1)  # 随机延迟，防止过快请求
-
-        # 规范化 URL
+    filtered = []
+    for link in raw_links:
+        if not is_subscription_link(link):
+            continue
+        # 规范化一下，方便后面请求时不报错
+        url = link
         if url.startswith('//'):
             url = 'https:' + url
         elif not url.startswith('http'):
             url = 'https://' + url
 
-        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
-        if resp.status_code != 200:
-            logger.warning(f"    ❌ HTTP {resp.status_code}: {url}")
-            return False
+        # 验证 HTTP 状态码和内容
+        try:
+            time.sleep(1)
+            resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
+            if resp.status_code != 200:
+                logger.warning(f"    ❌ HTTP {resp.status_code}: {url}")
+                continue
 
-        content = resp.text.lower()
-        # 包含常见 VPN 字段即视为有效
-        if any(k in content for k in ['proxies', 'vmess', 'ss://', 'trojan', 'vless', 'clash']):
-            logger.info(f"    ✔️ 有效订阅: {url}")
-            return True
+            content = resp.text.lower()
+            if any(k in content for k in ['proxies', 'vmess', 'ss://', 'trojan', 'vless', 'clash']):
+                logger.info(f"    ✔️ 有效订阅: {url}")
+                filtered.append(url)
+            elif re.fullmatch(r'[A-Za-z0-9+/=]+', content.strip()):
+                logger.info(f"    ✔️ 有效Base64: {url}")
+                filtered.append(url)
+            else:
+                logger.warning(f"    ❌ 无有效配置: {url}")
 
-        # 如果返回体本身就是纯 Base64 也当作有效
-        if re.fullmatch(r'[A-Za-z0-9+/=]+', content.strip()):
-            logger.info(f"    ✔️ 有效Base64: {url}")
-            return True
+        except Exception as e:
+            logger.warning(f"⚠️ 验证异常: {url} - {str(e)}")
 
-        logger.warning(f"    ❌ 无有效配置: {url}")
-        return False
-
-    except Exception as e:
-        logger.warning(f"⚠️ 验证异常: {url} - {str(e)}")
-        return False
+    return filtered
 
 
 # ---------------------- 推送到 Telegram ----------------------
 async def send_to_telegram(bot_token: str, channel_id: str, urls: list):
     """
-    异步推送前 10 条有效链接到 Telegram 频道 / 群组
+    异步推送前 10 条有效链接到 Telegram 频道/群组
     """
     if not urls:
         logger.warning("❌ 无有效链接，跳过推送")
@@ -178,38 +195,36 @@ async def main():
     logger.info("🚀 FreeFQ 节点爬虫启动")
     asession = AsyncHTMLSession()
     try:
-        # 1. 提取最新文章 URL 列表
+        # 1. 获取分类页最新文章列表
         post_urls = await extract_post_urls(asession)
 
-        # 2. 针对最新 N 篇（这里取 5）文章，提取订阅链接
-        all_links = set()
+        # 2. 针对最新 5 篇（可根据需求调整）文章，收集“原始候选链接”
+        all_raw_links = set()
         for post_url in sorted(post_urls, reverse=True)[:5]:
-            links = await extract_links_from_post(asession, post_url)
-            all_links.update(links)
-        logger.info(f"\n🔍 共提取到 {len(all_links)} 条可能订阅链接，开始验证...")
+            raw = await extract_raw_links_from_post(asession, post_url)
+            all_raw_links.update(raw)
 
-        # 3. 同步验证有效订阅链接
-        valid_links = []
-        for link in all_links:
-            if validate_subscription(link):
-                valid_links.append(link)
+        logger.info(f"\n🔍 共收集到 {len(all_raw_links)} 条“候选链接”，开始筛选与验证…")
+
+        # 3. 筛选并验证最终有效订阅链接
+        valid_links = filter_and_validate_links(list(all_raw_links))
         logger.info(f"\n✔️ 验证完成！共 {len(valid_links)} 条有效订阅链接")
 
-        # 4. 保存到本地文件，方便后续检查
+        # 4. 保存到本地文件（可选）
         if valid_links:
             with open("freefq_valid_links.txt", "w", encoding="utf-8") as f:
                 for v in valid_links:
                     f.write(v + "\n")
             logger.info("📄 已保存到 freefq_valid_links.txt")
 
-        # 5. 推送到 Telegram（若配置了 BOT_TOKEN & CHANNEL_ID）
+        # 5. 如果配置了 BOT_TOKEN & CHANNEL_ID，则推送到 Telegram
         if BOT_TOKEN and CHANNEL_ID:
             await send_to_telegram(BOT_TOKEN, CHANNEL_ID, valid_links)
         else:
             logger.warning("❌ 未配置 BOT_TOKEN 或 CHANNEL_ID，已跳过 Telegram 推送")
 
     finally:
-        # 显式关闭 AsyncHTMLSession，避免 “Event loop is closed” 报错
+        # 6. 关闭 AsyncHTMLSession，避免“Event loop is closed”报错
         try:
             await asession.close()
             logger.info("ℹ️ AsyncHTMLSession 已关闭")
