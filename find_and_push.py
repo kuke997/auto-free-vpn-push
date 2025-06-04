@@ -13,44 +13,29 @@ CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 
 def fetch_nodefree_links():
-    print("🌐 正在抓取 nodefree.net 最新节点...")
+    print("🌐 正在抓取 nodefree.net 首页所有可能的订阅链接...")
     try:
         base_url = "https://nodefree.net"
         headers = {'User-Agent': 'Mozilla/5.0'}
         resp = requests.get(base_url, headers=headers, timeout=15)
+        resp.raise_for_status()
         soup = BeautifulSoup(resp.text, 'html.parser')
 
-        # 查找第一篇包含“节点”或“订阅”的文章链接
-        post_link = None
-        for a in soup.select("h2.entry-title > a"):
-            if "节点" in a.text or "订阅" in a.text:
-                post_link = a['href']
-                break
-
-        if not post_link:
-            print("❌ 没有找到节点文章")
-            return []
-
-        print("🔗 找到文章：", post_link)
-        res = requests.get(post_link, headers=headers, timeout=15)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        text = soup.get_text()
         found_links = set()
 
-        # 提取网页内所有 a 标签的 href 链接
+        # 查找所有<a>标签，href中包含 .yaml 或 .yml 或 clash (不区分大小写)
         for a in soup.find_all("a", href=True):
             href = a["href"].strip()
-            if re.search(r"(http.*\.(yaml|yml|txt))", href):
+            if re.search(r"\.ya?ml", href, re.I) or re.search(r"clash", href, re.I):
+                # 补全相对链接
+                if href.startswith("//"):
+                    href = "https:" + href
+                elif href.startswith("/"):
+                    href = base_url + href
                 found_links.add(href)
 
-        # 再次检查正文中直接包含的链接文本（如 vmess://, ss:// 等）
-        link_matches = re.findall(r'(https?://[^\s"\']+|vmess://[^\s"\']+|ss://[^\s"\']+)', text)
-        for l in link_matches:
-            if any(x in l for x in ['yaml', 'yml', 'txt', 'vmess://', 'ss://']):
-                found_links.add(l.strip())
-
         links = list(found_links)
-        print(f"📥 nodefree.net 提取到 {len(links)} 个订阅链接")
+        print(f"📥 nodefree.net 首页提取到 {len(links)} 个可能的订阅链接")
         return links
     except Exception as e:
         print("❌ 抓取失败:", e)
@@ -60,10 +45,14 @@ def fetch_nodefree_links():
 def validate_subscription(url):
     try:
         res = requests.get(url, timeout=10)
-        return res.status_code == 200 and (
-            "proxies" in res.text or "vmess://" in res.text or "ss://" in res.text
-        )
-    except:
+        if res.status_code != 200:
+            return False
+        text = res.text.lower()
+        # 简单判定是否含有节点关键词
+        if "proxies" in text or "vmess://" in text or "ss://" in text or "clash" in text:
+            return True
+        return False
+    except Exception:
         return False
 
 
