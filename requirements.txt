@@ -1,5 +1,5 @@
 requests
-python-telegram-bot==20.7
-pyyaml
-beautifulsoup4
+python-telegram-bot==20.0
 requests-html
+lxml_html_clean
+lxml
