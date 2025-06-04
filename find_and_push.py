@@ -2,6 +2,7 @@ import os
 import requests
 import asyncio
 import yaml
+from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.constants import ParseMode
 import urllib.parse
@@ -53,7 +54,6 @@ def search_github_clash_urls():
         return []
 
 def get_subscription_country_info(url):
-    """下载订阅yaml并解析，只提取节点的country或region字段，返回不重复国家列表字符串"""
     try:
         res = requests.get(url, timeout=10)
         if res.status_code != 200:
@@ -74,18 +74,48 @@ def get_subscription_country_info(url):
                 countries.add(region.strip())
                 continue
 
-            # 备用：用name字段前2个字母作为简写
             name = proxy.get("name") or proxy.get("remark") or proxy.get("remarks")
             if name and isinstance(name, str) and len(name) >= 2:
                 countries.add(name[:2].strip())
 
-        if countries:
-            return ", ".join(sorted(countries))
-        else:
-            return None
+        return ", ".join(sorted(countries)) if countries else None
     except Exception as e:
         print(f"解析节点地区失败：{url}，错误：{e}")
         return None
+
+def fetch_nodefree_links():
+    print("🌐 正在抓取 nodefree.net 最新节点...")
+    try:
+        base_url = "https://nodefree.net"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        resp = requests.get(base_url, headers=headers, timeout=15)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+
+        post_link = None
+        for a in soup.find_all('a'):
+            if '免费节点' in a.text:
+                post_link = a['href']
+                break
+
+        if not post_link:
+            print("❌ 没有找到最新节点文章")
+            return []
+
+        full_url = post_link if post_link.startswith("http") else base_url + post_link
+        res = requests.get(full_url, headers=headers, timeout=15)
+        soup = BeautifulSoup(res.text, 'html.parser')
+
+        found_links = []
+        for a in soup.find_all('a'):
+            href = a.get('href', '')
+            if href.startswith("http") and (".yaml" in href or "vmess://" in href or "ss://" in href):
+                found_links.append(href.strip())
+
+        print(f"📥 nodefree.net 提取到 {len(found_links)} 个订阅链接")
+        return found_links
+    except Exception as e:
+        print("❌ 抓取 nodefree.net 失败:", e)
+        return []
 
 async def send_to_telegram(bot_token, channel_id, urls):
     if not urls:
@@ -118,14 +148,18 @@ async def main():
         print("环境变量 BOT_TOKEN 或 CHANNEL_ID 未设置")
         return
 
-    print("🔍 验证预定义订阅链接...")
+    print("🔍 验证静态订阅链接...")
     valid_static = [url for url in STATIC_SUBSCRIBE_URLS if validate_subscription(url)]
 
     github_links = search_github_clash_urls()
-    print("🔍 验证GitHub搜索到的订阅链接...")
+    print("🔍 验证 GitHub 搜索到的订阅链接...")
     valid_dynamic = [url for url in github_links if validate_subscription(url)]
 
-    all_valid = valid_static + valid_dynamic
+    nodefree_links = fetch_nodefree_links()
+    print("🔍 验证 nodefree.net 获取到的链接...")
+    valid_nodefree = [url for url in nodefree_links if validate_subscription(url)]
+
+    all_valid = list(set(valid_static + valid_dynamic + valid_nodefree))
     print(f"✔️ 共验证通过的有效订阅链接数量: {len(all_valid)}")
 
     with open("valid_links.txt", "w") as f:
